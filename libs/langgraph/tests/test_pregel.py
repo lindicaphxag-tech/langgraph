@@ -5817,6 +5817,51 @@ def test_multiple_interrupts_functional_cache(
     assert counter == 6
 
 
+def test_functional_parallel_task_interrupts_surface_all(
+    sync_checkpointer: BaseCheckpointSaver,
+) -> None:
+    @task
+    def ask(question: int) -> str:
+        return interrupt({"question": question})
+
+    @entrypoint(checkpointer=sync_checkpointer)
+    def workflow(count: int) -> list[str]:
+        futures = [ask(i) for i in range(count)]
+        return [future.result() for future in futures]
+
+    config = {"configurable": {"thread_id": "parallel-task-interrupts"}}
+
+    result = workflow.invoke(3, config=config)
+    assert {interrupt.value["question"] for interrupt in result["__interrupt__"]} == {
+        0,
+        1,
+        2,
+    }
+
+    state = workflow.get_state(config)
+    assert {interrupt.value["question"] for interrupt in state.interrupts} == {
+        0,
+        1,
+        2,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="When there are multiple pending interrupts, you must specify the interrupt id when resuming.",
+    ):
+        workflow.invoke(Command(resume="one answer"), config=config)
+
+    resume_map = {
+        interrupt.id: f"answer-{interrupt.value['question']}"
+        for interrupt in state.interrupts
+    }
+    assert workflow.invoke(Command(resume=resume_map), config=config) == [
+        "answer-0",
+        "answer-1",
+        "answer-2",
+    ]
+
+
 def test_task_before_interrupt_resume(
     sync_checkpointer: BaseCheckpointSaver,
 ) -> None:
