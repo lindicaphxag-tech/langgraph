@@ -1319,11 +1319,13 @@ class PregelLoop:
             persisted_interrupts = pending_interrupts_from_writes(
                 self.checkpoint_pending_writes
             )
-            interrupt_ids = {interrupt.id for interrupt in emitted_interrupts}
+            emitted_interrupt_ids = {
+                interrupt.id for interrupt in emitted_interrupts
+            }
             interrupts = emitted_interrupts + tuple(
                 interrupt
                 for interrupt in persisted_interrupts
-                if interrupt.id not in interrupt_ids
+                if interrupt.id not in emitted_interrupt_ids
             )
             self._push_graph_lifecycle_event("interrupt", interrupts=interrupts)
             # emit one last "values" event, with pending writes applied
@@ -1356,10 +1358,29 @@ class PregelLoop:
             # several such tasks interrupt in parallel, the parent exception may
             # contain only the first one even though every child interrupt was
             # persisted. Emit the missing persisted interrupts here.
+            visible_pending_writes = []
+            if hasattr(self, "tasks"):
+                for write in self.checkpoint_pending_writes:
+                    task = self.tasks.get(write[0])
+                    if task is None:
+                        continue
+                    if task.config is not None and TAG_HIDDEN in task.config.get(
+                        "tags", EMPTY_SEQ
+                    ):
+                        continue
+                    if task.path[0] == PUSH and task.path[-1] is True:
+                        continue
+                    visible_pending_writes.append(write)
+            visible_interrupt_ids = {
+                interrupt.id
+                for interrupt in pending_interrupts_from_writes(
+                    visible_pending_writes
+                )
+            }
             missing_interrupts = tuple(
                 interrupt
-                for interrupt in interrupts
-                if interrupt.id not in interrupt_ids
+                for interrupt in persisted_interrupts
+                if interrupt.id not in visible_interrupt_ids
             )
             if missing_interrupts:
                 self._emit(
