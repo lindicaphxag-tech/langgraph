@@ -89,6 +89,7 @@ from langgraph.pregel._algo import (
     apply_writes,
     checkpoint_null_version,
     increment,
+    pending_interrupts_from_writes,
     prepare_next_tasks,
     prepare_node_error_handler_task,
     prepare_single_task,
@@ -817,33 +818,12 @@ class PregelLoop:
 
     def _pending_interrupts(self) -> set[str]:
         """Return the set of interrupt ids that are pending without corresponding resume values."""
-        # mapping of task ids to interrupt ids
-        pending_interrupts: dict[str, str] = {}
-
-        # set of resume task ids
-        pending_resumes: set[str] = set()
-
-        for task_id, write_type, value in self.checkpoint_pending_writes:
-            if write_type == INTERRUPT:
-                # interrupts is always a list, but there should only be one element
-                pending_interrupts[task_id] = value[0].id
-            elif write_type == RESUME:
-                pending_resumes.add(task_id)
-
-        resumed_interrupt_ids = {
-            pending_interrupts[task_id]
-            for task_id in pending_resumes
-            if task_id in pending_interrupts
+        return {
+            interrupt.id
+            for interrupt in pending_interrupts_from_writes(
+                self.checkpoint_pending_writes
+            )
         }
-
-        # Keep only interrupts whose interrupt_id is not resumed
-        hanging_interrupts: set[str] = {
-            interrupt_id
-            for interrupt_id in pending_interrupts.values()
-            if interrupt_id not in resumed_interrupt_ids
-        }
-
-        return hanging_interrupts
 
     def _first(
         self, *, input_keys: str | Sequence[str], updated_channels: set[str] | None
@@ -1335,7 +1315,16 @@ class PregelLoop:
         # suppress interrupt
         if isinstance(exc_value, GraphInterrupt) and not self.is_nested:
             interrupt = exc_value
-            interrupts = tuple(interrupt.args[0]) if interrupt.args else ()
+            emitted_interrupts = tuple(interrupt.args[0]) if interrupt.args else ()
+            persisted_interrupts = pending_interrupts_from_writes(
+                self.checkpoint_pending_writes
+            )
+            interrupt_ids = {interrupt.id for interrupt in emitted_interrupts}
+            interrupts = emitted_interrupts + tuple(
+                interrupt
+                for interrupt in persisted_interrupts
+                if interrupt.id not in interrupt_ids
+            )
             self._push_graph_lifecycle_event("interrupt", interrupts=interrupts)
             # emit one last "values" event, with pending writes applied
             if (
@@ -1362,12 +1351,36 @@ class PregelLoop:
                         [w for t in self.tasks.values() for w in t.writes],
                         self.channels,
                     )
-            # emit INTERRUPT if exception is empty (otherwise emitted by put_writes)
-            if not interrupt.args or not interrupt.args[0]:
-                interrupt_payload = interrupt.args[0] if interrupt.args else ()
+            # Dynamic functional call tasks intentionally suppress their own
+            # interrupt stream events and delegate surfacing to the parent. If
+            # several such tasks interrupt in parallel, the parent exception may
+            # contain only the first one even though every child interrupt was
+            # persisted. Emit the missing persisted interrupts here.
+            missing_interrupts = tuple(
+                interrupt
+                for interrupt in interrupts
+                if interrupt.id not in interrupt_ids
+            )
+            if missing_interrupts:
                 self._emit(
                     "updates",
-                    lambda: iter([{INTERRUPT: interrupt_payload}]),
+                    lambda: iter([{INTERRUPT: missing_interrupts}]),
+                )
+                current_values = read_channels(self.channels, self.output_keys)
+                if isinstance(current_values, dict):
+                    current_values[INTERRUPT] = missing_interrupts
+                    self._emit("values", lambda: iter([current_values]))
+                else:
+                    self._emit(
+                        "values",
+                        lambda: iter([{INTERRUPT: missing_interrupts}]),
+                    )
+            # Preserve the existing empty interrupt event for interrupt_before /
+            # interrupt_after, where there is no dynamic interrupt payload.
+            elif not emitted_interrupts:
+                self._emit(
+                    "updates",
+                    lambda: iter([{INTERRUPT: ()}]),
                 )
             # save final output
             self.output = read_channels(self.channels, self.output_keys)
