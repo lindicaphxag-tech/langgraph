@@ -79,6 +79,7 @@ from langgraph.types import (
     All,
     CacheKey,
     CachePolicy,
+    Interrupt,
     PregelExecutableTask,
     PregelTask,
     RetryPolicy,
@@ -227,6 +228,44 @@ def local_read(
 def increment(current: int | None, channel: None) -> int:
     """Default channel versioning function, increments the current int version."""
     return current + 1 if current is not None else 1
+
+
+def pending_interrupts_from_writes(
+    pending_writes: Iterable[PendingWrite],
+) -> tuple[Interrupt, ...]:
+    """Return unresolved interrupts persisted in checkpoint writes.
+
+    Functional call tasks are scheduled dynamically and are not always
+    reconstructable as top-level PregelTask objects from a checkpoint.
+    Their interrupt writes are still persisted, so use those writes as the
+    source of truth and deduplicate by interrupt id. A RESUME write resolves
+    the interrupt associated with the same task id.
+    """
+    interrupts_by_task: dict[str, tuple[Interrupt, ...]] = {}
+    resumed_tasks: set[str] = set()
+
+    for task_id, channel, value in pending_writes:
+        if channel == INTERRUPT:
+            values = value if isinstance(value, Sequence) else (value,)
+            interrupts_by_task[task_id] = tuple(values)
+        elif channel == RESUME:
+            resumed_tasks.add(task_id)
+
+    resumed_ids = {
+        interrupt.id
+        for task_id in resumed_tasks
+        for interrupt in interrupts_by_task.get(task_id, ())
+    }
+
+    seen: set[str] = set()
+    unresolved: list[Interrupt] = []
+    for interrupts in interrupts_by_task.values():
+        for interrupt in interrupts:
+            if interrupt.id in resumed_ids or interrupt.id in seen:
+                continue
+            seen.add(interrupt.id)
+            unresolved.append(interrupt)
+    return tuple(unresolved)
 
 
 def apply_writes(
