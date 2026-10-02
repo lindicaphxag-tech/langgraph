@@ -5832,6 +5832,7 @@ def test_functional_parallel_task_interrupts_surface_all(
     config = {"configurable": {"thread_id": "parallel-task-interrupts"}}
 
     result = workflow.invoke(3, config=config)
+    assert len(result["__interrupt__"]) == 3
     assert {interrupt.value["question"] for interrupt in result["__interrupt__"]} == {
         0,
         1,
@@ -5839,6 +5840,7 @@ def test_functional_parallel_task_interrupts_surface_all(
     }
 
     state = workflow.get_state(config)
+    assert len(state.interrupts) == 3
     assert {interrupt.value["question"] for interrupt in state.interrupts} == {
         0,
         1,
