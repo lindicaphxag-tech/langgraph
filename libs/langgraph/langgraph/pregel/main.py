@@ -124,6 +124,7 @@ from langgraph.pregel._algo import (
     _scratchpad,
     apply_writes,
     local_read,
+    pending_interrupts_from_writes,
     prepare_next_tasks,
 )
 from langgraph.pregel._call import identifier
@@ -1262,7 +1263,7 @@ class Pregel(
             saved.checkpoint["ts"],
             patch_checkpoint_map(saved.parent_config, saved.metadata),
             tasks_with_writes,
-            tuple([i for task in tasks_with_writes for i in task.interrupts]),
+            pending_interrupts_from_writes(saved.pending_writes or []),
         )
 
     async def _aprepare_state_snapshot(
@@ -1386,7 +1387,7 @@ class Pregel(
             saved.checkpoint["ts"],
             patch_checkpoint_map(saved.parent_config, saved.metadata),
             tasks_with_writes,
-            tuple([i for task in tasks_with_writes for i in task.interrupts]),
+            pending_interrupts_from_writes(saved.pending_writes or []),
         )
 
     def get_state(
